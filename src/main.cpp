@@ -1,6 +1,10 @@
-#include <iostream>
+#include "HttpServer.h"
 
 int main() {
-    std::cout <<"HTTP Server starting..." << std::endl;
+
+ HttpServer server(8080);
+    server.start();
+
     return 0;
+
 }
