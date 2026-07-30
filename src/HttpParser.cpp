@@ -5,6 +5,7 @@
 #include <string>
 #include <cctype>
 #include <algorithm>
+#include <charconv>
 
 std::optional<HttpRequest> HttpParser::parse(const std::string& rawRequest) {
 
@@ -32,14 +33,26 @@ std::optional<HttpRequest> HttpParser::parse(const std::string& rawRequest) {
 
     {
         return std::nullopt;
-    }  
-    
+    }
+
     std::string extra;
 
     if(requestLineStream >> extra)
     {
       return std::nullopt;
     }
+
+    if (request.path.empty() || request.path.front() != '/')
+    {
+        return std::nullopt;
+    }
+
+    if (request.version != "HTTP/1.1")
+    {
+        return std::nullopt;
+    }
+
+    bool endOfHeadersFound = false;
 
     while (std::getline(requestStream, line))
     {
@@ -50,6 +63,7 @@ std::optional<HttpRequest> HttpParser::parse(const std::string& rawRequest) {
 
         if(line.empty())
         {
+            endOfHeadersFound = true;
             break;
         }
 
@@ -62,6 +76,16 @@ std::optional<HttpRequest> HttpParser::parse(const std::string& rawRequest) {
 
         std::string key = line.substr(0, colonPosition);
         std::string value = line.substr(colonPosition + 1);
+
+         if(key.empty())
+        {
+            return std::nullopt;
+        }
+
+        if (key.find_first_of(" \t") != std::string::npos)
+        {
+           return std::nullopt;
+        }
 
         std::transform(
             key.begin(),
@@ -81,15 +105,29 @@ std::optional<HttpRequest> HttpParser::parse(const std::string& rawRequest) {
         }
         else
         {
-            value = value.substr(firstValueCharacter);
+            const std::size_t lastValueCharacter =
+               value.find_last_not_of(" \t");
+
+            value = value.substr(
+                firstValueCharacter,
+                lastValueCharacter - firstValueCharacter + 1
+            );
         }
 
-        if(key.empty())
+
+
+        const bool inserted =
+          request.headers.emplace(key, value).second;
+
+        if (!inserted)
         {
             return std::nullopt;
         }
+    }
 
-        request.headers[key] = value;
+    if (!endOfHeadersFound)
+    {
+        return std::nullopt;
     }
 
     std::ostringstream bodyStream;
@@ -97,8 +135,56 @@ std::optional<HttpRequest> HttpParser::parse(const std::string& rawRequest) {
 
     request.body = bodyStream.str();
 
+    const auto contentLengthHeader =
+        request.headers.find("content-length");
+
+    if (contentLengthHeader != request.headers.end())
+    {
+        const auto contentLength =
+            parseContentLength(contentLengthHeader->second);
+
+        if (!contentLength.has_value())
+        {
+            return std::nullopt;
+        }
+
+        if (request.body.size() != contentLength.value())
+        {
+            return std::nullopt;
+        }
+    }
+
     return request;
 
 
 
+}
+
+std::optional<std::size_t> HttpParser::parseContentLength(
+    std::string_view value
+)
+{
+    if (value.empty())
+    {
+        return std::nullopt;
+    }
+
+    std::size_t contentLength = 0;
+
+    const char* const begin = value.data();
+    const char* const end = begin + value.size();
+
+    const auto [ptr, error] = std::from_chars(
+        begin,
+        end,
+        contentLength
+    );
+
+    if (error != std::errc{} || ptr != end)
+    {
+        return std::nullopt;
+
+    }
+
+    return contentLength;
 }
