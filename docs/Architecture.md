@@ -51,8 +51,15 @@ server startup is aborted.
 `HttpParser` transforms a string containing a complete HTTP request into an
 `HttpRequest` structure.
 
-Its main interface is a `static` method because parsing does not depend on any
-state preserved between requests.
+Its interfaces are `static` methods because parsing does not depend on any state
+preserved between requests.
+
+`determineRequestSize()` examines a complete request head, validates the framing
+information, and calculates the total number of bytes expected from
+`Content-Length`.
+
+`parse()` is called only after that number of bytes has been received. It
+transforms the complete raw request into an `HttpRequest`.
 
 The parser is responsible for the HTTP structure supported by the project,
 including:
@@ -97,31 +104,26 @@ The currently implemented flow is:
 main()
   → construct HttpServer
   → HttpServer::start()
-  → create the socket
-  → configure the socket
+  → create and configure the listening socket
   → bind()
   → listen()
   → acceptLoop()
   → accept()
   → handleClient()
-  → recv()
-  → close the client socket
-```
-
-`HttpParser` is functional and tested independently, but it is not yet connected
-to the receive operation performed in `handleClient()`.
-
-The target flow by the end of Phase 2 is:
-
-```text
-accept()
-  → handleClient()
-  → receive one or more TCP fragments
-  → reconstruct the complete request
+  → receive and accumulate TCP fragments
+  → detect the end of the request head
+  → determine the complete request size
+  → continue receiving until the request is complete
   → HttpParser::parse()
   → obtain an HttpRequest or reject the request
   → close the client socket
 ```
+handleClient() does not assume that one call to recv() contains one complete
+HTTP request. It accumulates the received bytes and calls HttpParser::parse()
+only after the complete request has been reconstructed.
+
+The connection is currently closed after processing one request. Persistent
+connections are not yet supported.
 
 ---
 
@@ -133,7 +135,7 @@ A request sent in a single operation by a client may therefore be received by
 the server across multiple calls to `recv()`. Conversely, a call to `recv()`
 does not necessarily represent a complete request.
 
-The intended separation is:
+The implemented separation is:
 
 ### `HttpServer::handleClient()`
 
@@ -214,8 +216,6 @@ by `std::size_t`.
 
 - concurrent connection handling;
 - a thread pool;
-- TCP fragment reassembly;
-- final size limits for headers and bodies;
 - routing;
 - HTTP response generation and serialization;
 - complete response transmission;

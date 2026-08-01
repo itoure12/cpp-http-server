@@ -7,6 +7,8 @@ validate each phase.
 It describes the project's evolution. The currently implemented architecture
 is documented separately in `Architecture.md`.
 
+
+
 ---
 
 ## Phase 1 — TCP Server Foundations
@@ -119,9 +121,9 @@ connection, passes it to `handleClient()`, and then closes the client socket.
 
 ## Phase 2 — HTTP Request Reception and Parsing
 
-> Status: in progress
+> Status: completed
 > Part 1 completed: `HttpParser`
-> Part 2 in progress: TCP reception in `HttpServer::handleClient()`
+> Part 2 completed: TCP reception in `HttpServer::handleClient()`
 
 ### Part 1 — HttpParser
 
@@ -219,7 +221,7 @@ assembling its fragments, and determining the end of the message belong to
 
 #### Validation Evidence
 
-- All 21 GoogleTest tests pass.
+- All 27 GoogleTest tests pass.
 - The CMake build succeeds.
 - Valid and invalid cases are covered by the parser tests.
 
@@ -242,39 +244,88 @@ Additional validation planned:
 - The difference between a loop ending because of an empty line and one ending
   because the stream has been exhausted.
 
-### Part 2 — TCP Reception in handleClient
+### Part 2 — TCP Reception in `handleClient()`
 
-#### Current State
+#### Implemented Behavior
 
-- `handleClient()` is declared, defined, and called by `acceptLoop()`.
-- An initial read using `recv()` has been implemented.
-- The request sent by `curl` is received and displayed correctly.
-- The client socket is closed after it is handled.
-- No HTTP response is sent yet.
+`HttpServer::handleClient()` now receives and accumulates TCP data until one
+complete HTTP request has been obtained.
 
-#### Current Validation
+The reception loop:
 
-A local request sent with:
+- calls `recv()` repeatedly;
+- appends only the number of bytes actually received;
+- detects the end of the request head with `\r\n\r\n`;
+- uses `HttpParser::determineRequestSize()` to calculate the complete request
+  size from `Content-Length`;
+- continues receiving while the request is incomplete;
+- rejects data exceeding the expected request size;
+- calls `HttpParser::parse()` only after the complete request has been received;
+- closes the client socket on both success and failure.
 
-```bash
-curl http://localhost:8080/
-```
+The loop establishes the following post-condition: when execution continues
+after the loop, `rawRequest` contains exactly one complete HTTP request.
 
-is received and displayed by the server.
+#### Size Protections
 
-`curl` currently reports the `Empty reply from server` error. This behavior is
-expected: the server closes the client connection without sending an HTTP
-response because `handleClient()` does not call `send()` yet.
+The reception logic enforces separate limits for:
 
-#### Remaining Work
+- the HTTP request head through `MAX_REQUEST_HEAD_SIZE`;
+- the request body through `MAX_BODY_SIZE`.
 
-- Receive a request that may be fragmented across multiple calls to `recv()`.
-- Accumulate only the bytes actually received.
-- Detect the end of the headers with `\r\n\r\n`.
-- Determine the expected body size from `Content-Length`.
-- Enforce size limits for headers and the body.
-- Detect disconnections and receive errors.
-- Call `HttpParser::parse()` once the complete request has been received.
-- Handle a rejected request cleanly.
-- Add tests for fragmented reception.
-- Prepare for future HTTP response generation.
+A request is rejected if:
+
+- its head exceeds the configured limit;
+- its `Content-Length` is invalid;
+- it contains duplicate `Content-Length` headers;
+- its announced body exceeds the configured limit;
+- additional bytes are received after the expected end of the request.
+
+#### Error Handling
+
+The client connection is closed when:
+
+- `recv()` reports an error;
+- the client disconnects before sending a complete request;
+- the request head is invalid;
+- the request exceeds a configured size limit;
+- `HttpParser::parse()` rejects the completed request.
+
+No HTTP error response is sent yet. Response generation belongs to Phase 3.
+
+#### Manual Validation
+
+The TCP reception path was validated manually with a running server.
+
+The following scenarios succeeded:
+
+- `GET /` was received and parsed correctly;
+- `POST /test` with `Content-Length: 5` and body `hello` was received correctly;
+- the invalid request `GARBAGE\r\n\r\n` was rejected;
+- the open file descriptor count remained at `4` before and after 20 requests;
+- a fragmented body sent as `he`, followed one second later by `llo`, was
+  accumulated and parsed correctly as `POST /split`.
+
+`curl` reported `Empty reply from server`, which is expected because the server
+currently closes the connection without sending an HTTP response.
+
+#### Automated Testing Decision
+
+Automated socket-level tests are deferred until Phase 3.
+
+At the current stage, `handleClient()` returns `void` and produces no HTTP
+response, so a test would have to depend on captured debug output. Once response
+generation exists, `socketpair()` can provide two connected local sockets:
+the test will send a request through one endpoint and verify the HTTP response
+received through the other.
+
+#### Known Limitations
+
+The following limitations are documented for later phases:
+
+- `recv()` has no timeout, so an incomplete client can block the sequential
+  server indefinitely;
+- `recv()` does not yet retry when interrupted with `errno == EINTR`;
+- persistent `accept()` failures could produce a busy loop;
+- `acceptLoop()` has no shutdown condition, so the server cannot yet terminate
+  gracefully and return normally from `start()`.
