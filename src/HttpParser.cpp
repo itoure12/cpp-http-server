@@ -6,6 +6,7 @@
 #include <cctype>
 #include <algorithm>
 #include <charconv>
+#include <limits>
 
 std::optional<HttpRequest> HttpParser::parse(const std::string& rawRequest) {
 
@@ -187,4 +188,123 @@ std::optional<std::size_t> HttpParser::parseContentLength(
     }
 
     return contentLength;
+}
+
+std::optional<std::size_t> HttpParser::determineRequestSize(
+    std::string_view requestHead
+)
+{
+    if (
+        requestHead.size() < 4 ||
+        requestHead.substr(requestHead.size() - 4) != "\r\n\r\n"
+    )
+    {
+        return std::nullopt;
+    }
+
+    std::istringstream requestHeadStream{
+        std::string(requestHead)
+    };
+
+    std::string line;
+
+    if(!std::getline(requestHeadStream, line))
+    {
+        return std::nullopt;
+    }
+
+    std::optional<std::size_t> contentLength;
+
+    while (std::getline(requestHeadStream, line))
+    {
+        if(!line.empty() && line.back() == '\r')
+        {
+            line.pop_back();
+
+        }
+
+        if (line.empty())
+        {
+            break;
+        }
+
+        const std::size_t colonPosition = line.find(':');
+
+
+        if (colonPosition == std::string::npos)
+        {
+            return std::nullopt;
+        }
+
+        std::string key = line.substr(0, colonPosition);
+        std::string value = line.substr(colonPosition + 1);
+
+        if (key.empty())
+        {
+            return std::nullopt;
+        }
+
+        if (key.find_first_of(" \t") != std::string::npos)
+        {
+            return std::nullopt;
+        }
+
+        std::transform(
+            key.begin(),
+            key.end(),
+            key.begin(),
+            [](unsigned char character)
+            {
+                return std::tolower(character);
+            }
+        );
+
+        if (key != "content-length")
+        {
+            continue;
+        }
+
+        if (contentLength.has_value())
+        {
+            return std::nullopt;
+        }
+
+        const std::size_t firstValueCharacter =
+        value.find_first_not_of(" \t");
+
+        if (firstValueCharacter == std::string::npos)
+        {
+            return std::nullopt;
+        }
+
+        const std::size_t lastValueCharacter =
+        value.find_last_not_of(" \t");
+
+        value = value.substr(
+            firstValueCharacter,
+            lastValueCharacter - firstValueCharacter + 1
+        );
+
+        contentLength = parseContentLength(value);
+
+        if (!contentLength.has_value())
+        {
+            return std::nullopt;
+        }
+    }
+
+    if(!contentLength.has_value())
+    {
+        return requestHead.size();
+    }
+
+    if(
+        contentLength.value() >
+        std::numeric_limits<std::size_t>::max() - requestHead.size()
+    )
+    {
+        return std::nullopt;
+    }
+
+    return requestHead.size() + contentLength.value();
 }

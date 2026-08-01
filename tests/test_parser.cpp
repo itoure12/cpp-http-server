@@ -270,7 +270,7 @@ TEST(HttpParser, AcceptsUnknownMethod)
 TEST(HttpParser,  RejectsDuplicateContentLength)
 {
     const std::string rawRequest =
-    "POST /HTTP/1.1\r\n"
+    "POST / HTTP/1.1\r\n"
     "Host: localhost\r\n"
     "Content-length: 5\r\n"
     "Content-length: 5\r\n"
@@ -285,12 +285,14 @@ TEST(HttpParser,  RejectsDuplicateContentLength)
 TEST(HttpParser, RejectsDuplicateHeadersCaseInsensitively)
 {
     const std::string rawRequest =
-    "GET /HTTP/1.1\r\n"
+    "GET / HTTP/1.1\r\n"
     "X-Request-Id: first\r\n"
     "x-request-id: second\r\n"
     "\r\n";
 
     const auto result = HttpParser::parse(rawRequest);
+
+    EXPECT_FALSE(result.has_value());
 }
 
 
@@ -316,4 +318,86 @@ TEST(HttpParser, RejectsUnterminatedHeaders)
     const auto result = HttpParser::parse(rawRequest);
 
     EXPECT_FALSE(result.has_value());
+}
+
+TEST(HttpParser, DeterminesRequestSizeWithoutContentLength)
+{
+    const std::string requestHead =
+        "GET / HTTP/1.1\r\n"
+        "Host: localhost\r\n"
+        "\r\n";
+
+    const auto result =
+        HttpParser::determineRequestSize(requestHead);
+
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result.value(), requestHead.size());
+}
+
+TEST(HttpParser, DeterminesRequestSizeWithContentLength)
+{
+    const std::string requestHead =
+        "POST /users HTTP/1.1\r\n"
+        "Host: localhost\r\n"
+        "Content-Length: 5\r\n"
+        "\r\n";
+
+    const auto result =
+        HttpParser::determineRequestSize(requestHead);
+
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result.value(), requestHead.size() + 5);
+}
+
+TEST(HttpParser, RejectsInvalidContentLengthWhenDeterminingSize)
+{
+    const std::string requestHead =
+        "POST / HTTP/1.1\r\n"
+        "Content-Length: abc\r\n"
+        "\r\n";
+
+    const auto result =
+        HttpParser::determineRequestSize(requestHead);
+
+    EXPECT_FALSE(result.has_value());
+}
+
+TEST(HttpParser, RejectsDuplicateContentLengthWhenDeterminingSize)
+{
+    const std::string requestHead =
+        "POST / HTTP/1.1\r\n"
+        "Content-Length: 5\r\n"
+        "content-length: 5\r\n"
+        "\r\n";
+
+    const auto result =
+        HttpParser::determineRequestSize(requestHead);
+
+    EXPECT_FALSE(result.has_value());
+}
+
+TEST(HttpParser, RejectsUnterminatedHeadWhenDeterminingSize)
+{
+    const std::string requestHead =
+        "GET / HTTP/1.1\r\n"
+        "Host: localhost\r\n";
+
+    const auto result =
+        HttpParser::determineRequestSize(requestHead);
+
+    EXPECT_FALSE(result.has_value());
+}
+
+TEST(HttpParser, AcceptsWhitespaceWhenDeterminingSize)
+{
+    const std::string requestHead =
+        "POST / HTTP/1.1\r\n"
+        "Content-Length: \t5 \t\r\n"
+        "\r\n";
+
+    const auto result =
+        HttpParser::determineRequestSize(requestHead);
+
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result.value(), requestHead.size() + 5);
 }
