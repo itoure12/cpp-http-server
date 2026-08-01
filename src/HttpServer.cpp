@@ -1,3 +1,4 @@
+#include "HttpParser.h"
 #include "HttpServer.h"
 
 #include <iostream>
@@ -133,36 +134,117 @@ void HttpServer::acceptLoop()
 void HttpServer::handleClient(int clientSocket)
 {
    std::array<char, 4096> buffer{};
+   std::string rawRequest;
 
-   const ssize_t bytesReceived = recv(
-    clientSocket,
-    buffer.data(),
-    buffer.size(),
-    0
-   );
+ while (true)
+    {
 
-   if(bytesReceived == -1)
-   {
-    perror("recv");
-    close(clientSocket);
-    return;
-   }
+       const ssize_t bytesReceived = recv(
+            clientSocket,
+            buffer.data(),
+            buffer.size(),
+            0
+        );
 
-   if (bytesReceived == 0)
-   {
-    std::cout <<"Client disconneted.\n";
-    close(clientSocket);
-    return;
-   }
+        if (bytesReceived == -1)
+        {
+            perror("recv");
+            close(clientSocket);
+            return;
+        }
 
-   const std::string rawRequest(
-    buffer.data(),
-    static_cast<std::size_t>(bytesReceived)
-   );
+        if (bytesReceived == 0)
+        {
+            std::cout << "Client disconnected.\n";
+            close(clientSocket);
+            return;
+        }
 
-   std::cout << "Received request:\n"
-             << rawRequest
-             << '\n';
+        rawRequest.append(
+            buffer.data(),
+            static_cast<std::size_t>(bytesReceived)
+        );
 
-    close(clientSocket);
+        const std::size_t requestHeadEnd =
+            rawRequest.find("\r\n\r\n");
+
+        if (requestHeadEnd == std::string::npos)
+        {
+            if (rawRequest.size() > MAX_REQUEST_HEAD_SIZE)
+            {
+                std::cout << "HTTP headers are too large.\n";
+                close(clientSocket);
+                return;
+            }
+
+            continue;
+        }
+
+        const std::size_t requestHeadSize = requestHeadEnd + 4;
+
+        if (requestHeadSize > MAX_REQUEST_HEAD_SIZE)
+        {
+            std::cout << "HTTP headers are too large.\n";
+            close(clientSocket);
+            return;
+        }
+
+        const auto expectedRequestSize =
+        HttpParser::determineRequestSize(
+            std::string_view(
+                rawRequest.data(),
+                requestHeadSize
+            )
+        );
+
+        if (!expectedRequestSize.has_value())
+        {
+            std::cout << "Invalid HTTP request head.\n";
+            close(clientSocket);
+            return;
+        }
+
+        const std::size_t expectedBodySize =
+          expectedRequestSize.value() - requestHeadSize;
+
+       if (expectedBodySize > MAX_BODY_SIZE)
+       {
+          std::cout << "HTTP request body is too large.\n";
+          close(clientSocket);
+          return;
+       }
+
+        if(rawRequest.size() < expectedRequestSize.value())
+        {
+            continue;
+        }
+
+         if(rawRequest.size() > expectedRequestSize.value())
+        {
+            std::cout <<"Unexpected data after HTTP request.\n";
+            close(clientSocket);
+            return;
+        }
+        break;
+    }
+
+
+  const auto request = HttpParser::parse(rawRequest);
+
+        if (!request.has_value())
+        {
+            std::cout << "Invalid HTTP request.\n";
+            close(clientSocket);
+            return;
+        }
+
+        std::cout << "Received "
+                  << request->method
+                  << " "
+                  << request->path
+                  << '\n';
+
+        close(clientSocket);
+
+
 }
