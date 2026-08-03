@@ -66,6 +66,7 @@ enable_testing()
 
 add_executable(unit_tests
    tests/test_parser.cpp
+   tests/HttpResponseTest.cpp
 )
 
 target_link_libraries(unit_tests

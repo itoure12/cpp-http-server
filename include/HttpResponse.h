@@ -3,14 +3,30 @@
 #include <string>
 #include <unordered_map>
 
-struct HttpResponse
+class HttpResponse
 {
-    std::string version;
+    public:
+       explicit HttpResponse(int statusCode, std::string body = "");
 
-    int statusCode;
-    std::string statusMessage;
+       void setHeader(std::string name, std::string  value);
 
-    std::unordered_map<std::string, std::string> headers;
+       std::string serialize() const;
 
-    std::string body;
-};
+    private:
+       struct Header
+       {
+        std::string displayName;
+        std::string value;
+       };
+       std::string version_ = "HTTP/1.1";
+       int statusCode_;
+       std::string reasonPhrase_;
+       
+       std::unordered_map<std::string, Header> headers_;
+       std::string body_;
+
+       static std::string reasonPhraseFor(int statusCode);
+       static std::string normalizeHeaderName(std::string name);
+       static std::string canonicalizeHeaderName(
+        const std::string& normalizedName);
+};  
