@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <string_view>
 
 class HttpServer
 {
@@ -27,8 +28,10 @@ class HttpServer
         bool configureSocket();
         bool bindSocket();
         bool listenForConnections();
+        bool sendAll(int clientSocket, std::string_view data);
         void acceptLoop();
         void handleClient(int clientSocket);
+
 
 
 };

@@ -7,6 +7,10 @@
 #include <netinet/in.h>
 #include <array>
 #include <string>
+#include "HttpResponse.h"
+#include <cerrno>
+#include <string_view>
+#include <optional>
 
 HttpServer::HttpServer(std::uint16_t port)
      :port_(port), serverSocket_(-1)
@@ -135,6 +139,7 @@ void HttpServer::handleClient(int clientSocket)
 {
    std::array<char, 4096> buffer{};
    std::string rawRequest;
+   std::optional<std::size_t> expectedRequestSize;
 
  while (true)
     {
@@ -148,6 +153,11 @@ void HttpServer::handleClient(int clientSocket)
 
         if (bytesReceived == -1)
         {
+            if(errno == EINTR)
+            {
+                continue;
+            }
+
             perror("recv");
             close(clientSocket);
             return;
@@ -164,55 +174,63 @@ void HttpServer::handleClient(int clientSocket)
             buffer.data(),
             static_cast<std::size_t>(bytesReceived)
         );
+        
+        if (!expectedRequestSize.has_value()) 
+        { 
 
-        const std::size_t requestHeadEnd =
-            rawRequest.find("\r\n\r\n");
+            const std::size_t requestHeadEnd =
+                rawRequest.find("\r\n\r\n");
 
-        if (requestHeadEnd == std::string::npos)
-        {
-            if (rawRequest.size() > MAX_REQUEST_HEAD_SIZE)
+            if (requestHeadEnd == std::string::npos)
+            {
+                if (rawRequest.size() > MAX_REQUEST_HEAD_SIZE)
+                {
+                    std::cout << "HTTP headers are too large.\n";
+                    close(clientSocket);
+                    return;
+                }
+
+                continue;
+            }
+
+            const std::size_t requestHeadSize = requestHeadEnd + 4;
+
+            if (requestHeadSize > MAX_REQUEST_HEAD_SIZE)
             {
                 std::cout << "HTTP headers are too large.\n";
                 close(clientSocket);
                 return;
             }
 
-            continue;
+            const auto determinedSize  =
+            HttpParser::determineRequestSize(
+                std::string_view(
+                    rawRequest.data(),
+                    requestHeadSize
+                )
+            );
+
+            if (!determinedSize.has_value())
+            {
+                std::cout << "Invalid HTTP request head.\n";
+                close(clientSocket);
+                return;
+            }
+
+            const std::size_t expectedBodySize =
+                  determinedSize.value() - requestHeadSize;
+
+            if (expectedBodySize > MAX_BODY_SIZE)
+            {
+                std::cout << "HTTP request body is too large.\n";
+                close(clientSocket);
+                return;
+            }
+
+            expectedRequestSize = determinedSize.value();
         }
 
-        const std::size_t requestHeadSize = requestHeadEnd + 4;
-
-        if (requestHeadSize > MAX_REQUEST_HEAD_SIZE)
-        {
-            std::cout << "HTTP headers are too large.\n";
-            close(clientSocket);
-            return;
-        }
-
-        const auto expectedRequestSize =
-        HttpParser::determineRequestSize(
-            std::string_view(
-                rawRequest.data(),
-                requestHeadSize
-            )
-        );
-
-        if (!expectedRequestSize.has_value())
-        {
-            std::cout << "Invalid HTTP request head.\n";
-            close(clientSocket);
-            return;
-        }
-
-        const std::size_t expectedBodySize =
-          expectedRequestSize.value() - requestHeadSize;
-
-       if (expectedBodySize > MAX_BODY_SIZE)
-       {
-          std::cout << "HTTP request body is too large.\n";
-          close(clientSocket);
-          return;
-       }
+      
 
         if(rawRequest.size() < expectedRequestSize.value())
         {
@@ -244,7 +262,53 @@ void HttpServer::handleClient(int clientSocket)
                   << request->path
                   << '\n';
 
+
+        HttpResponse response(200, "Hello\n");
+
+        response.setHeader("Content-Type", "text/plain");
+        response.setHeader("Connection", "close");
+
+        const std::string rawResponse = response.serialize();
+
+        if(!sendAll(clientSocket, rawResponse))
+        {
+            close(clientSocket);
+            return;
+        }
         close(clientSocket);
 
 
 }
+
+bool HttpServer::sendAll(
+    int clientSocket,
+    std::string_view data)
+    
+{
+    std::size_t totalBytesSent = 0;
+
+    while (totalBytesSent < data.size())
+    {
+        const ssize_t bytesSent = send(
+            clientSocket,
+            data.data() + totalBytesSent,
+            data.size() - totalBytesSent,
+            MSG_NOSIGNAL
+        );
+
+        if (bytesSent == -1)
+        {
+            if (errno == EINTR)
+            {
+                continue;
+            }
+
+            perror("send");
+            return false;
+        }
+
+        totalBytesSent += static_cast<std::size_t>(bytesSent);
+    }
+
+   return true;
+}     
