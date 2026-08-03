@@ -262,6 +262,10 @@ The reception loop:
 - rejects data exceeding the expected request size;
 - calls `HttpParser::parse()` only after the complete request has been received;
 - closes the client socket on both success and failure.
+- stores the expected request size after the request head has been analyzed;
+- avoids analyzing the same request head again during subsequent calls to
+  `recv()`;
+- retries `recv()` when it is interrupted with `errno == EINTR`;
 
 The loop establishes the following post-condition: when execution continues
 after the loop, `rawRequest` contains exactly one complete HTTP request.
@@ -291,7 +295,9 @@ The client connection is closed when:
 - the request exceeds a configured size limit;
 - `HttpParser::parse()` rejects the completed request.
 
-No HTTP error response is sent yet. Response generation belongs to Phase 3.
+Valid requests now receive an HTTP response through the functionality added in
+Phase 3. Invalid requests are still handled by closing the connection without
+sending a structured HTTP error response.
 
 #### Manual Validation
 
@@ -306,18 +312,18 @@ The following scenarios succeeded:
 - a fragmented body sent as `he`, followed one second later by `llo`, was
   accumulated and parsed correctly as `POST /split`.
 
-`curl` reported `Empty reply from server`, which is expected because the server
-currently closes the connection without sending an HTTP response.
+At the end of Phase 2, `curl` reported `Empty reply from server` because no
+response-generation mechanism existed yet. Phase 3 subsequently added response
+serialization and transmission.
 
 #### Automated Testing Decision
 
-Automated socket-level tests are deferred until Phase 3.
+Socket-level automated tests using `socketpair()` were considered during this
+phase but have not yet been implemented.
 
-At the current stage, `handleClient()` returns `void` and produces no HTTP
-response, so a test would have to depend on captured debug output. Once response
-generation exists, `socketpair()` can provide two connected local sockets:
-the test will send a request through one endpoint and verify the HTTP response
-received through the other.
+Phase 3 added unit tests for response generation and manual end-to-end tests
+covering real TCP reception and response transmission. Automated socket-level
+integration tests remain planned.
 
 #### Known Limitations
 
@@ -325,7 +331,155 @@ The following limitations are documented for later phases:
 
 - `recv()` has no timeout, so an incomplete client can block the sequential
   server indefinitely;
-- `recv()` does not yet retry when interrupted with `errno == EINTR`;
 - persistent `accept()` failures could produce a busy loop;
 - `acceptLoop()` has no shutdown condition, so the server cannot yet terminate
   gracefully and return normally from `start()`.
+
+ ---
+
+## Phase 3 — HTTP Response Generation and Transmission
+
+> Status: completed
+
+### Objective
+
+Complete the server's first request-response cycle by representing HTTP
+responses, serializing them into HTTP/1.1 wire format, and guaranteeing that
+all serialized bytes are transmitted to the client.
+
+### Responsibilities and Limitations
+
+`HttpResponse` represents a response before it is transmitted.
+
+It is responsible for:
+
+- storing the response status;
+- storing the response headers;
+- storing the response body;
+- calculating `Content-Length`;
+- serializing the response into HTTP/1.1 format.
+
+`HttpServer` remains responsible for network transmission.
+
+After receiving and parsing one complete request, `handleClient()` constructs an
+`HttpResponse`, serializes it, passes the serialized data to `sendAll()`, and
+closes the connection.
+
+### Technical Decisions
+
+- Introduced an `HttpResponse` class so that HTTP response construction is
+  separated from socket transmission.
+
+- Provided `setHeader()` so response headers can be added before serialization.
+
+- Made `serialize()` generate:
+
+  - the HTTP status line;
+  - the response headers;
+  - the empty line separating the headers from the body;
+  - the response body.
+
+- Calculated `Content-Length` automatically from the number of bytes in the
+  response body. This prevents the declared length from becoming inconsistent
+  with the actual body.
+
+- Returned the serialized response as a `std::string`, which owns the complete
+  byte sequence until transmission finishes.
+
+- Introduced `HttpServer::sendAll()` because a single call to `send()` is not
+  guaranteed to transmit the complete response.
+
+- Used a `std::size_t` counter to track the number of bytes already transmitted.
+
+- Passed the response data to `sendAll()` as a `std::string_view` so the function
+  can inspect the serialized data without making another copy.
+
+- Retried `send()` when it fails with `errno == EINTR`, because an interrupted
+  system call does not necessarily represent a connection failure.
+
+- Used `MSG_NOSIGNAL` to prevent the server process from receiving `SIGPIPE` if
+  the client disconnects during response transmission.
+
+- Added equivalent `EINTR` handling to the reception loop around `recv()`.
+
+- Explicitly added the `Connection: close` header because the server currently
+  processes only one request per connection.
+
+### Problems Encountered and Fixes
+
+- A single successful call to `send()` could have transmitted fewer bytes than
+  requested. `sendAll()` now repeats the operation until the complete response
+  has been transmitted.
+
+- Repeating `send()` requires advancing the data pointer and reducing the number
+  of remaining bytes. The transmitted-byte counter is used for both operations.
+
+- A client disconnecting during transmission could have caused `SIGPIPE` to
+  terminate the process. `MSG_NOSIGNAL` prevents that signal for the call to
+  `send()`.
+
+- A system call interrupted by a signal was initially treated as a permanent
+  failure. Both `recv()` and `send()` now retry when the reported error is
+  `EINTR`.
+
+### Accepted Simplifications
+
+- Every valid request currently receives the same `200 OK` response.
+
+- The response body is currently fixed and does not yet depend on the requested
+  method or path.
+
+- Routing and semantic validation are deferred to Phase 4.
+
+- Invalid requests do not yet receive structured responses such as `400 Bad
+  Request` or `413 Content Too Large`.
+
+- The connection is closed after one response. Persistent HTTP connections are
+  not yet supported.
+
+- Client sockets are still closed manually along the different execution paths.
+  A dedicated RAII wrapper may be introduced later.
+
+### Validation Evidence
+
+- The complete project builds successfully with CMake.
+
+- All 32 tests from two GoogleTest suites pass.
+
+- A real `GET /` request sent with `curl` produced a valid response containing:
+
+  - `HTTP/1.1 200 OK`;
+  - `Connection: close`;
+  - `Content-Type: text/plain`;
+  - the automatically calculated `Content-Length`;
+  - the expected response body.
+
+-A `POST /test` request containing the five-byte body `hello` was received,
+parsed, and answered successfully.
+
+- A fragmented `POST /split` request was sent with the request head, `bon`, and
+  `jour` transmitted separately.
+
+- The server waited until all seven body bytes had been received before parsing
+  the request and transmitting the response.
+
+This final fragmented-request test validates the complete path:
+
+```text
+multiple recv() calls
+→ request accumulation
+→ remembered expected size
+→ complete request parsing
+→ response construction
+→ serialization
+→ complete transmission 
+```
+#### What I Learned
+- Why one call to send() cannot be assumed to transmit an entire buffer.
+- How to implement complete transmission using a byte counter.
+- How pointer arithmetic identifies the first byte that has not yet been sent.
+- Why EINTR represents a retryable interruption rather than a permanent network failure.
+- How MSG_NOSIGNAL protects a server from SIGPIPE.
+- How to separate HTTP response representation from network transmission.
+- Why Content-Length should be derived automatically from the response body.
+- How to validate TCP fragmentation with a real client sending one request across multiple writes.

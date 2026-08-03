@@ -10,13 +10,14 @@ Decisions made during development are documented separately in
 
 ## Overview
 
-The project is currently divided into three main components:
+The project is currently divided into four main components:
 
 | Component | Responsibility |
 |---|---|
-| `HttpServer` | Create the listening socket, accept clients, and receive network data |
-| `HttpParser` | Transform a complete raw HTTP request into an `HttpRequest` |
-| `HttpRequest` | Represent the different parts of a validated HTTP request |
+| `HttpServer` | Own the listening socket, receive complete requests, and transmit responses |
+| `HttpParser` | Determine request boundaries and transform a complete raw request into an `HttpRequest` |
+| `HttpRequest` | Represent the different parts of a parsed HTTP request |
+| `HttpResponse` | Represent and serialize an HTTP response |
 
 This separation prevents networking logic and HTTP parsing logic from being
 mixed within a single class.
@@ -94,6 +95,30 @@ It currently contains:
 
 Header names are stored in lowercase to allow case-insensitive lookup.
 
+### `HttpResponse`
+
+`HttpResponse` represents an HTTP response before it is transmitted to the
+client.
+
+It currently contains:
+
+- a status code;
+- a reason phrase associated with the status code;
+- a collection of response headers;
+- a response body.
+
+Headers can be added with `setHeader()`.
+
+`serialize()` transforms the response into the HTTP/1.1 wire format expected by
+the client. It generates the status line, serializes the headers, adds the
+header-body separator, and appends the response body.
+
+`Content-Length` is calculated automatically from the number of bytes in the
+response body.
+
+The serialized response is returned as a `std::string` and is then transmitted
+by `HttpServer`.
+
 ---
 
 ## Current Connection Flow
@@ -102,7 +127,7 @@ The currently implemented flow is:
 
 ```text
 main()
-  → construct HttpServer
+ → construct HttpServer
   → HttpServer::start()
   → create and configure the listening socket
   → bind()
@@ -112,15 +137,25 @@ main()
   → handleClient()
   → receive and accumulate TCP fragments
   → detect the end of the request head
-  → determine the complete request size
+  → determine and remember the complete request size
   → continue receiving until the request is complete
   → HttpParser::parse()
   → obtain an HttpRequest or reject the request
+  → construct an HttpResponse
+  → serialize the response
+  → sendAll()
   → close the client socket
 ```
 handleClient() does not assume that one call to recv() contains one complete
 HTTP request. It accumulates the received bytes and calls HttpParser::parse()
 only after the complete request has been reconstructed.
+
+Once the request head has been analyzed, the expected total request size is
+stored and is not recalculated after every subsequent call to recv().
+
+The serialized response is transmitted with sendAll(), which continues
+calling send() until all response bytes have been sent or an unrecoverable
+error occurs.
 
 The connection is currently closed after processing one request. Persistent
 connections are not yet supported.
@@ -161,7 +196,23 @@ Responsible for HTTP interpretation:
 This boundary allows parsing to be tested independently of sockets.
 
 ---
+## Response Transmission
 
+`HttpResponse` is responsible for constructing the HTTP representation of a
+response, while `HttpServer` is responsible for transmitting its serialized
+bytes.
+
+A single call to `send()` is not guaranteed to transmit the complete response.
+`HttpServer::sendAll()` therefore tracks the number of bytes already sent and
+continues until the entire serialized response has been transmitted.
+
+If `send()` is interrupted by a signal and reports `EINTR`, the operation is
+retried. Any other transmission error aborts the connection.
+
+`MSG_NOSIGNAL` is used to prevent the process from receiving `SIGPIPE` when a
+client disconnects before the response has been completely transmitted.
+
+---
 ## Resource Ownership
 
 ### Listening Socket
@@ -217,8 +268,8 @@ by `std::size_t`.
 - concurrent connection handling;
 - a thread pool;
 - routing;
-- HTTP response generation and serialization;
-- complete response transmission;
+- semantic validation of methods and routes;
+- structured HTTP error responses;
 - persistent connections;
 - controlled server shutdown.
 
@@ -241,10 +292,9 @@ Their rationale and possible future evolution are documented in the
 The following components are planned but have not yet been implemented:
 
 - `Router`, to map a method and route to a handler;
-- `HttpResponse`, to represent an HTTP response;
-- a response serialization mechanism;
-- a send function that guarantees transmission of all bytes;
+- structured HTTP error-response generation;
 - a concurrency strategy for handling multiple clients;
+- persistent connection management;
 - controlled server shutdown.
 
 They are not yet part of the implemented architecture.
