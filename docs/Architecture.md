@@ -10,13 +10,14 @@ Decisions made during development are documented separately in
 
 ## Overview
 
-The project is currently divided into four main components:
+The project is currently divided into five main components:
 
 | Component | Responsibility |
 |---|---|
-| `HttpServer` | Own the listening socket, receive complete requests, and transmit responses |
-| `HttpParser` | Determine request boundaries and transform a complete raw request into an `HttpRequest` |
+| `HttpServer` | Own the listening socket, reconstruct complete requests, dispatch them, and transmit responses |
+| `HttpParser` | Validate request framing and transform a complete raw request into an `HttpRequest` |
 | `HttpRequest` | Represent the different parts of a parsed HTTP request |
+| `Router` | Match a request method and path to a handler or generate a routing error response |
 | `HttpResponse` | Represent and serialize an HTTP response |
 
 This separation prevents networking logic and HTTP parsing logic from being
@@ -39,13 +40,21 @@ Its current responsibilities are:
 - accepting incoming connections;
 - passing each client socket to `handleClient()`;
 - receiving data sent by the client;
-- closing the network resources it owns.
+- closing the network resources it owns;
+- delegating valid parsed requests to `Router::route()`;
+- transmitting serialized responses completely with `sendAll()`;
 
 The initialization steps are separated into private methods so that each method
 represents a specific networking operation.
 
 `start()` is the public entry point for starting the server. If any step fails,
 server startup is aborted.
+
+A configured `Router` is supplied when the server is constructed. The router is
+moved into the server and stored as `router_`.
+
+The server freezes the router during construction so that its route
+configuration cannot be modified while requests are being processed.
 
 ### `HttpParser`
 
@@ -62,16 +71,37 @@ information, and calculates the total number of bytes expected from
 `parse()` is called only after that number of bytes has been received. It
 transforms the complete raw request into an `HttpRequest`.
 
+When the request-target contains a query string, `parse()` separates it from the
+path at the first `?` character.
+
+For example:
+
+```text
+/search?q=test
+```
+
+is represented as:
+
+```text
+path  = /search
+query = q=test
+```
+
+The query remains in its raw encoded form. Percent-decoding and interpretation
+of individual query parameters are not currently performed.
+
 The parser is responsible for the HTTP structure supported by the project,
 including:
 
 - the request line;
 - the HTTP method;
 - the request-target;
+- separating the path and query string contained in the request-target;
 - the HTTP version;
 - the headers;
 - `Content-Length`;
 - the body.
+
 
 It returns a `std::optional<HttpRequest>`:
 
@@ -79,7 +109,7 @@ It returns a `std::optional<HttpRequest>`:
 - `std::nullopt` when the request is invalid or ambiguous.
 
 The parser does not decide whether a method is implemented or whether a route
-exists. Those decisions will belong to the routing layer.
+exists. Those decisions belong to the routing layer..
 
 ### `HttpRequest`
 
@@ -88,12 +118,56 @@ exists. Those decisions will belong to the routing layer.
 It currently contains:
 
 - the method;
-- the path or request-target;
+- the path;
+- the raw query string;
 - the version;
 - the headers;
 - the body.
 
 Header names are stored in lowercase to allow case-insensitive lookup.
+
+The path does not include the query string. The query is stored separately
+without the leading `?` character.
+
+### `Router`
+
+`Router` owns the route configuration and dispatches parsed requests to
+handlers.
+
+A route is identified by the combination of:
+
+- an HTTP method;
+- an exact path;
+- a handler that receives an `HttpRequest` and returns an `HttpResponse`.
+
+`addRoute()` rejects:
+
+- unsupported registration methods;
+- empty paths;
+- paths that do not begin with `/`;
+- empty handlers;
+- duplicate method-path combinations;
+- routes added after the router has been frozen.
+
+The same path may be registered for different methods, and the same method may
+be registered for different paths.
+
+`freeze()` prevents further route registration. `HttpServer` freezes its router
+during construction before request processing begins.
+
+`route()` applies the following decision order:
+
+1. an unknown method produces `501 Not Implemented`;
+2. a method known by the server with an unknown path produces `404 Not Found`;
+3. an existing path without a handler for the requested method produces
+   `405 Method Not Allowed` and an `Allow` header;
+4. a matching method and path execute the registered handler.
+
+The `501` check deliberately occurs before path lookup. Therefore, an unknown
+method used with an unknown path still produces `501 Not Implemented`.
+
+The router does not receive data from sockets and does not serialize or transmit
+responses. It only selects or constructs an `HttpResponse`.
 
 ### `HttpResponse`
 
@@ -119,6 +193,7 @@ response body.
 The serialized response is returned as a `std::string` and is then transmitted
 by `HttpServer`.
 
+
 ---
 
 ## Current Connection Flow
@@ -141,7 +216,10 @@ main()
   → continue receiving until the request is complete
   → HttpParser::parse()
   → obtain an HttpRequest or reject the request
-  → construct an HttpResponse
+  → Router::route()
+  → execute a matching handler or generate a routing error response
+  → obtain an HttpResponse
+  → add the current connection policy
   → serialize the response
   → sendAll()
   → close the client socket
@@ -159,6 +237,13 @@ error occurs.
 
 The connection is currently closed after processing one request. Persistent
 connections are not yet supported.
+
+For a valid parsed request, `HttpServer` delegates the application-level
+decision to `Router::route()`.
+
+The router either executes a matching handler or constructs an appropriate
+`404`, `405`, or `501` response. `HttpServer` then applies the current
+connection policy, serializes the response, and transmits it.
 
 ---
 
@@ -234,6 +319,15 @@ Each client socket is returned by `accept()` and then passed to
 After the connection has been handled, the socket must be closed exactly once,
 including when a receive or parsing error occurs.
 
+### Router
+
+The configured router is passed by value to the `HttpServer` constructor and
+then moved into the `router_` member.
+
+`HttpServer` therefore owns the router used during request processing. The
+router is frozen during server construction, so its route table remains stable
+throughout the server's lifetime.
+
 ---
 
 ## Parsing Behavior
@@ -244,7 +338,15 @@ The parser accepts any method with valid syntax.
 
 ### Request-Target
 
-Only the `origin-form`, whose target begins with `/`, is supported.
+Only the `origin-form` is supported.
+
+The request-target must contain a non-empty path beginning with `/`. If a query
+string is present, the parser separates it at the first `?` character.
+
+The path is stored without the query, while the query is stored separately
+without the leading `?`.
+
+Query percent-decoding and parameter interpretation are not yet implemented.
 
 ### Headers
 
@@ -267,9 +369,7 @@ by `std::size_t`.
 
 - concurrent connection handling;
 - a thread pool;
-- routing;
-- semantic validation of methods and routes;
-- structured HTTP error responses;
+- structured error responses for malformed or oversized requests;
 - persistent connections;
 - controlled server shutdown.
 
@@ -289,10 +389,9 @@ Their rationale and possible future evolution are documented in the
 
 ## Planned Architecture
 
-The following components are planned but have not yet been implemented:
+The following capabilities are planned but have not yet been implemented:
 
-- `Router`, to map a method and route to a handler;
-- structured HTTP error-response generation;
+- structured error-response generation for reception and parsing failures;
 - a concurrency strategy for handling multiple clients;
 - persistent connection management;
 - controlled server shutdown.

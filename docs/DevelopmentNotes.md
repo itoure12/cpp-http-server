@@ -483,3 +483,236 @@ multiple recv() calls
 - How to separate HTTP response representation from network transmission.
 - Why Content-Length should be derived automatically from the response body.
 - How to validate TCP fragmentation with a real client sending one request across multiple writes.
+
+---
+
+## Phase 4 — Routing and Request Dispatch
+
+> Status: completed
+
+### Objective
+
+Introduce a routing layer capable of mapping a parsed HTTP request to an
+application handler and producing an appropriate HTTP response when no matching
+route exists.
+
+This phase replaces the fixed response previously constructed directly by
+`HttpServer::handleClient()` with a response selected by `Router`.
+
+### Responsibilities and Limitations
+
+`Router` owns the route configuration and performs application-level request
+dispatch.
+
+A route associates:
+
+- an HTTP method;
+- an exact path;
+- a handler receiving an `HttpRequest` and returning an `HttpResponse`.
+
+`Router` is responsible for:
+
+- registering routes before request processing begins;
+- rejecting invalid or duplicate route registrations;
+- matching a request by method and path;
+- executing the corresponding handler;
+- producing `404 Not Found`, `405 Method Not Allowed`, or
+  `501 Not Implemented` responses when appropriate.
+
+`Router` does not:
+
+- receive bytes from sockets;
+- parse raw HTTP requests;
+- serialize responses;
+- transmit response bytes.
+
+Those responsibilities remain assigned to `HttpServer`, `HttpParser`, and
+`HttpResponse`.
+
+### Technical Decisions
+
+- Introduced a dedicated `Router` class to separate request dispatch from TCP
+  connection handling.
+
+- Represented a handler as a callable receiving a parsed `HttpRequest` and
+  returning an `HttpResponse`.
+
+- Identified each route by the combination of an HTTP method and an exact path.
+
+- Allowed the same path to be registered for different methods.
+
+- Allowed the same method to be registered for different paths.
+
+- Rejected route registrations containing:
+
+  - an unsupported registration method;
+  - an empty path;
+  - a path that does not begin with `/`;
+  - an empty handler;
+  - a duplicate method-path combination.
+
+- Added `freeze()` to prevent the route configuration from being modified after
+  server initialization.
+
+- Passed the configured router by value to the `HttpServer` constructor and
+  moved it into the `router_` member.
+
+- Froze the router during `HttpServer` construction so its configuration remains
+  stable throughout request processing.
+
+- Kept unknown methods syntactically valid in `HttpParser`. Whether a method is
+  implemented is an application-level decision performed by `Router`.
+
+- Applied the following routing decision order:
+
+  1. an unknown method produces `501 Not Implemented`;
+  2. a known method with an unknown path produces `404 Not Found`;
+  3. an existing path without a handler for the requested method produces
+     `405 Method Not Allowed`;
+  4. an exact method-path match executes the registered handler.
+
+- Made the unknown-method check occur before path lookup. Consequently, an
+  unknown method used with an unknown path still produces
+  `501 Not Implemented`.
+
+- Added an `Allow` header to `405 Method Not Allowed` responses to indicate the
+  methods registered for the requested path.
+
+- Extended `HttpRequest` with a separate `query` member.
+
+- Updated `HttpParser::parse()` to split the request-target at the first `?`
+  character.
+
+  For example:
+
+  ```text
+  /search?q=test
+  ```
+
+  is represented as:
+
+  ```text
+  path  = /search
+  query = q=test
+  ```
+
+- Kept the query in its raw encoded form. Query decoding and parameter
+  interpretation are not performed during routing.
+
+- Used only the path when selecting a route. A query string therefore does not
+  change which handler is selected.
+
+- Updated `HttpServer::handleClient()` so that a successfully parsed request is
+  passed to `Router::route()` instead of receiving a fixed response.
+
+- Kept the current connection policy inside `HttpServer`. After routing,
+  `HttpServer` adds `Connection: close`, serializes the response, transmits it
+  with `sendAll()`, and closes the client socket.
+
+### Problems Encountered and Fixes
+
+- Constructing the response directly inside `handleClient()` mixed TCP connection
+  management with application-level decisions. Routing was moved into a separate
+  `Router` component.
+
+- Matching directly on the complete request-target would have caused a request
+  such as `/search?q=test` to differ from the registered `/search` route. The
+  parser now separates the path from the query before routing.
+
+- Looking up only a method-path combination was not sufficient to distinguish an
+  unknown path from an existing path requested with the wrong method. The router
+  now checks whether the path exists independently when determining whether to
+  return `404` or `405`.
+
+- An unknown method combined with an unknown path could have produced either
+  `404` or `501` depending on the lookup order. The decision order was explicitly
+  defined so unknown methods always produce `501`.
+
+- Allowing route registration during request processing could make the routing
+  configuration unpredictable. `freeze()` now prevents modifications after the
+  server has taken ownership of the configured router.
+
+- Registering the same method-path combination more than once could have silently
+  replaced an existing handler. Duplicate registrations are now rejected.
+
+### Accepted Simplifications
+
+- Route matching is exact. Path parameters, wildcards, and prefix matching are
+  not currently supported.
+
+- The router recognizes a deliberately limited set of HTTP methods.
+
+- Query strings do not participate in route selection.
+
+- Query percent-decoding and parameter interpretation are not implemented.
+
+- Handlers execute synchronously as part of the current sequential connection
+  flow.
+
+- Routing error responses use fixed status codes and response bodies.
+
+- Middleware and grouped routes are not currently supported.
+
+- The router cannot be modified after it has been frozen.
+
+### Validation Evidence
+
+- The complete project builds successfully with CMake.
+
+- All 47 GoogleTest tests pass.
+
+- The automated tests cover:
+
+  - valid route registration;
+  - rejection of invalid paths;
+  - rejection of empty handlers;
+  - rejection of unsupported registration methods;
+  - rejection of duplicate method-path combinations;
+  - registration of the same path for different methods;
+  - registration of the same method for different paths;
+  - rejection of registrations after `freeze()`;
+  - dispatch to the correct handler;
+  - `404 Not Found`;
+  - `405 Method Not Allowed`;
+  - generation of the `Allow` header;
+  - `501 Not Implemented`;
+  - separation of the path and query string;
+  - routing independently of the query string.
+
+- Manual end-to-end validation with `curl` covered five routing behaviors:
+
+  1. a matching method and path execute the registered handler and return
+     `200 OK`;
+  2. a request containing a query string is routed using only its path;
+  3. a known method with an unknown path returns `404 Not Found`;
+  4. an existing path requested with another known method returns
+     `405 Method Not Allowed` with an `Allow` header;
+  5. an unknown method returns `501 Not Implemented`.
+
+These validations exercise the complete request-response path:
+
+```text
+TCP reception
+→ complete request reconstruction
+→ HTTP parsing
+→ path and query separation
+→ route selection
+→ handler or routing error response
+→ response serialization
+→ complete transmission
+```
+
+### What I Learned
+
+- How to separate syntactic validation from application-level dispatch.
+- How to represent a request handler with a callable object.
+- Why a route is identified by both its method and its path.
+- How to distinguish `404 Not Found` from `405 Method Not Allowed`.
+- Why an unsupported method produces `501 Not Implemented`.
+- Why the order of routing decisions affects the resulting HTTP status.
+- How the `Allow` header communicates the methods supported by an existing
+  resource.
+- Why the query string must be separated from the path before route matching.
+- How move semantics transfer a configured component into its owner.
+- How freezing configuration creates a stable runtime state.
+- How a routing layer keeps application logic separate from socket management.
