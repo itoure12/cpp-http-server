@@ -401,3 +401,18 @@ TEST(HttpParser, AcceptsWhitespaceWhenDeterminingSize)
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(result.value(), requestHead.size() + 5);
 }
+
+TEST(HttpParser, SeparatesQueryStringFromPath)
+{
+    const std::string rawRequest =
+        "GET /search?q=test HTTP/1.1\r\n"
+        "Host: localhost\r\n"
+        "\r\n";
+
+    const auto request =
+        HttpParser::parse(rawRequest);
+
+    ASSERT_TRUE(request.has_value());
+    EXPECT_EQ(request->path, "/search");
+    EXPECT_EQ(request->query, "q=test");
+}

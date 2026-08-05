@@ -26,10 +26,12 @@ std::optional<HttpRequest> HttpParser::parse(const std::string& rawRequest) {
     }
 
     std::istringstream requestLineStream(line);
+    
+    std::string requestTarget;
 
     if(!(requestLineStream
          >> request.method
-         >> request.path
+         >> requestTarget
          >> request.version))
 
     {
@@ -42,6 +44,21 @@ std::optional<HttpRequest> HttpParser::parse(const std::string& rawRequest) {
     {
       return std::nullopt;
     }
+
+    const std::size_t queryPosition =
+         requestTarget.find('?');
+
+    if (queryPosition == std::string::npos)
+    {
+        request.path = requestTarget;
+    }
+    else{
+        request.path = 
+            requestTarget.substr(0, queryPosition);
+           
+        request.query =
+              requestTarget.substr(queryPosition + 1);    
+    }     
 
     if (request.path.empty() || request.path.front() != '/')
     {
