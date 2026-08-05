@@ -11,10 +11,13 @@
 #include <cerrno>
 #include <string_view>
 #include <optional>
+#include <utility>
 
-HttpServer::HttpServer(std::uint16_t port)
-     :port_(port), serverSocket_(-1)
-     {}
+HttpServer::HttpServer(std::uint16_t port, Router router)
+     :port_(port), serverSocket_(-1), router_(std::move(router))
+     {
+        router_.freeze();
+     }
 
 HttpServer::~HttpServer()
 {
@@ -263,9 +266,9 @@ void HttpServer::handleClient(int clientSocket)
                   << '\n';
 
 
-        HttpResponse response(200, "Hello\n");
+        HttpResponse response = router_.route(*request);
 
-        response.setHeader("Content-Type", "text/plain");
+        
         response.setHeader("Connection", "close");
 
         const std::string rawResponse = response.serialize();

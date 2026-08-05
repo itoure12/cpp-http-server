@@ -1,13 +1,20 @@
 #pragma once
 
+#include "Router.h"
+
 #include <cstdint>
 #include <cstddef>
 #include <string_view>
 
+
 class HttpServer
 {
     public:
-         explicit HttpServer(std::uint16_t port);
+          HttpServer(
+            std::uint16_t port,
+            Router router
+          );
+          
          ~HttpServer();
 
          HttpServer(const HttpServer&) = delete;
@@ -23,6 +30,8 @@ class HttpServer
 
         std::uint16_t port_;
         int serverSocket_;
+         Router router_;
+
 
         bool createSocket();
         bool configureSocket();
